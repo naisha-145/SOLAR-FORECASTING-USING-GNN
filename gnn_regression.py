@@ -1,3 +1,5 @@
+import torch_geometric
+print(torch_geometric.__version__)  # Should show 2.5.0+
 import pandas as pd
 import numpy as np
 import torch
