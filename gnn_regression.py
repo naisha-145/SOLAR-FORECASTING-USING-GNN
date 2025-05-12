@@ -1,93 +1,149 @@
-import torch_geometric
-print(torch_geometric.__version__)  # Should show 2.5.0+
 import pandas as pd
 import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+
 import torch
 import torch.nn.functional as F
 from torch_geometric.data import Data
 from torch_geometric.nn import GCNConv
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-import math
 
-# Load dataset
-df = pd.read_excel('data/Data_solar_on_27-04-2022.xlsx')
-df = df.dropna()
+def load_data(file_path):
+    """Load dataset from Excel file."""
+    try:
+        df = pd.read_excel(file_path)
+        return df
+    except FileNotFoundError:
+        print("❌ The file was not found.")
+        return None
 
-# Feature/target separation
-X = df.iloc[:, :-1].values
-y = df.iloc[:, -1].values
+def preprocess_data(df):
+    """Preprocess data by stripping spaces from column names and renaming."""
+    df.columns = df.columns.str.strip()
+    df.rename(columns={"Sloar Power": "Solar Power"}, inplace=True, errors='ignore')
+    return df
 
-# Normalization
-X = (X - X.mean(axis=0)) / X.std(axis=0)
+def inspect_data(df):
+    """Inspect data types and view the first few rows."""
+    print("📊 Data Types:")
+    print(df.dtypes)
+    print("📝 First Few Rows:")
+    print(df.head())
 
-# Convert to tensors
-X = torch.tensor(X, dtype=torch.float)
-y = torch.tensor(y, dtype=torch.float)
+def prepare_features(df):
+    """Prepare required features and target."""
+    features = ["Temperature Units", "Pressure Units", "Relative Humidity Units", "Wind Speed Units"]
+    target = "Solar Power"
+    required_columns = features + [target]
+    
+    # Attempt to convert columns to numeric
+    for col in required_columns:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # Drop rows with missing values
+    df = df.dropna(subset=required_columns)
+    
+    # Check if any columns were excluded due to non-numeric data
+    excluded_columns = [col for col in required_columns if df[col].dtype not in ['int64', 'float64']]
+    if excluded_columns:
+        print("❌ Excluded columns due to non-numeric data:", excluded_columns)
+        return None, None
+    
+    print("✅ Dataframe successfully filtered with required columns!")
+    X = df[features].values
+    y = df[target].values
+    return X, y
 
-# Efficient edge index construction (no self-loops)
-num_nodes = X.size(0)
-i, j = torch.meshgrid(torch.arange(num_nodes), torch.arange(num_nodes), indexing='ij')
-mask = (i != j)
-edge_index = torch.stack([i[mask], j[mask]], dim=0)
+def create_graph_data(X, y):
+    """Convert tabular data to PyTorch Geometric Data object."""
+    num_nodes = X.shape[0]
+    # Fully connected graph (for demonstration)
+    row = []
+    col = []
+    for i in range(num_nodes):
+        for j in range(num_nodes):
+            if i != j:
+                row.append(i)
+                col.append(j)
+    edge_index = torch.tensor([row, col], dtype=torch.long)
+    x = torch.tensor(X, dtype=torch.float)
+    y = torch.tensor(y, dtype=torch.float).view(-1, 1)
+    data = Data(x=x, edge_index=edge_index, y=y)
+    return data
 
-# Create graph data object
-data = Data(x=X, edge_index=edge_index, y=y)
-
-# Train-test split (80-20)
-indices = np.arange(num_nodes)
-train_idx, test_idx = train_test_split(indices, test_size=0.2, random_state=42)
-train_mask = torch.tensor(train_idx, dtype=torch.long)
-test_mask = torch.tensor(test_idx, dtype=torch.long)
-
-# GCN model definition
-class GCN(torch.nn.Module):
-    def __init__(self, input_dim, hidden_dim=32):
+class GCNRegressor(torch.nn.Module):
+    def __init__(self, num_features, hidden_dim=32):
         super().__init__()
-        self.conv1 = GCNConv(input_dim, hidden_dim)
-        self.conv2 = GCNConv(hidden_dim, 1)
+        self.conv1 = GCNConv(num_features, hidden_dim)
+        self.conv2 = GCNConv(hidden_dim, hidden_dim)
+        self.lin = torch.nn.Linear(hidden_dim, 1)
 
-    def forward(self, data):
-        x, edge_index = data.x, data.edge_index
-        x = F.relu(self.conv1(x, edge_index))
+    def forward(self, x, edge_index):
+        x = self.conv1(x, edge_index)
+        x = F.relu(x)
         x = self.conv2(x, edge_index)
-        return x.squeeze()
+        x = F.relu(x)
+        x = self.lin(x)
+        return x
 
-# Model initialization
-model = GCN(input_dim=X.size(1))
-optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
-loss_fn = torch.nn.MSELoss()
-
-# Training loop
-model.train()
-for epoch in range(200):
-    optimizer.zero_grad()
-    out = model(data)
-    loss = loss_fn(out[train_mask], data.y[train_mask])
-    loss.backward()
-    optimizer.step()
+def train_gnn_model(X, y):
+    """Train a GNN regressor and evaluate metrics."""
+    # Split indices for train/test
+    idx = np.arange(len(X))
+    idx_train, idx_test = train_test_split(idx, test_size=0.2, random_state=42)
     
-    if epoch % 20 == 0:
-        print(f"Epoch {epoch}, Loss: {loss.item():.4f}")
-
-# Evaluation
-model.eval()
-with torch.no_grad():
-    predictions = model(data)
+    data = create_graph_data(X, y)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    data = data.to(device)
     
-y_true = data.y[test_mask].numpy()
-y_pred = predictions[test_mask].numpy()
+    model = GCNRegressor(num_features=X.shape[1]).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+    loss_fn = torch.nn.MSELoss()
 
-# Calculate metrics
-metrics = {
-    "MSE": mean_squared_error(y_true, y_pred),
-    "MAE": mean_absolute_error(y_true, y_pred),
-    "R²": r2_score(y_true, y_pred)
-}
-metrics["RMSE"] = math.sqrt(metrics["MSE"])
+    # Training loop
+    model.train()
+    for epoch in range(200):
+        optimizer.zero_grad()
+        out = model(data.x, data.edge_index)
+        loss = loss_fn(out[idx_train], data.y[idx_train])
+        loss.backward()
+        optimizer.step()
+        if (epoch+1) % 50 == 0:
+            print(f"Epoch {epoch+1}, Loss: {loss.item():.4f}")
 
-# Print results
-print("\n--- Evaluation Metrics ---")
-for name, value in metrics.items():
-    print(f"{name}: {value:.4f}")
+    # Evaluation
+    model.eval()
+    with torch.no_grad():
+        y_pred = model(data.x, data.edge_index).cpu().numpy().flatten()
+        y_true = data.y.cpu().numpy().flatten()
+        
+        y_pred_test = y_pred[idx_test]
+        y_true_test = y_true[idx_test]
+        
+        mse = mean_squared_error(y_true_test, y_pred_test)
+        mae = mean_absolute_error(y_true_test, y_pred_test)
+        rmse = np.sqrt(mse)
+        r2 = r2_score(y_true_test, y_pred_test)
+        
+        print(f"\nGNN Model MSE: {mse:.4f}")
+        print(f"GNN Model MAE: {mae:.4f}")
+        print(f"GNN Model RMSE: {rmse:.4f}")
+        print(f"GNN Model R^2 (Coefficient of Determination): {r2:.4f}")
 
+    return model
+
+def main():
+    file_path = "Data_solar_on_27-04-2022.xlsx"
+    df = load_data(file_path)
+    
+    if df is not None:
+        df = preprocess_data(df)
+        inspect_data(df)
+        X, y = prepare_features(df)
+        
+        if X is not None and y is not None:
+            train_gnn_model(X, y)
+
+if __name__ == "__main__":
+    main()
