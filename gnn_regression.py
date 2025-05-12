@@ -21,30 +21,38 @@ import torch
 import torch.nn.functional as F
 
 def load_data(file_path):
-    """Load dataset from Excel file, skipping metadata rows."""
+    """Load dataset from Excel file with proper header handling."""
     try:
-        # Skip first 4 rows containing metadata/headers
-        df = pd.read_excel(file_path, skiprows=4)
+        # Skip first 5 rows containing metadata
+        df = pd.read_excel(file_path, skiprows=5, header=None)
+        
+        # Manually assign column names based on your data structure
+        columns = [
+            'Year', 'Month', 'Day', 'Hour', 'Minute', 'Season', 
+            'Cloud_Type', 'Clearsky_DHI', 'Clearsky_DNI', 'Clearsky_GHI',
+            'Solar_Zenith', 'Dew_Point', 'Temperature', 'Humidity',
+            'Albedo', 'Solar_Power', 'Unnamed1', 'Unnamed2', 'Unnamed3',
+            'Unnamed4', 'Norm_DHI', 'Norm_DNI', 'Norm_GHI', 'Norm_Zenith',
+            'Norm_Dew', 'Norm_Temp', 'Norm_Humidity', 'Norm_Albedo',
+            'Norm_Solar', 'Dummy1', 'Dummy2'
+        ]
+        df.columns = columns[:len(df.columns)]
         return df
     except FileNotFoundError:
         print("❌ The file was not found.")
         return None
 
 def preprocess_data(df):
-    """Preprocess data and fix column names."""
-    # Clean column names
-    df.columns = df.columns.str.strip()
+    """Clean and prepare the data."""
+    # Convert numeric columns
+    numeric_cols = ['Temperature', 'Dew_Point', 'Humidity', 'Solar_Power']
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
     
-    # Fix column name typos and inconsistencies
-    df.rename(columns={
-        "Sloar Power(w).1": "Solar Power",
-        "Temperature©.1": "Temperature Units",
-        "Relative Humidity(%).1": "Relative Humidity Units",
-        "Surface Albedo.1": "Surface Albedo",
-        "Dew Point©.1": "Dew Point Units"
-    }, inplace=True, errors='ignore')
+    # Drop unnecessary columns
+    df = df.drop(columns=['Unnamed1', 'Unnamed2', 'Unnamed3', 'Unnamed4', 'Dummy1', 'Dummy2'])
     
-    return df
+    return df.dropna()
 
 def inspect_data(df):
     """Inspect data types and sample rows."""
@@ -55,138 +63,92 @@ def inspect_data(df):
     print(df.head())
 
 def prepare_features(df):
-    """Prepare features and target with robust type handling."""
-    features = [
-        "Temperature Units", 
-        "Dew Point Units",
-        "Relative Humidity Units", 
-        "Surface Albedo"
-    ]
-    target = "Solar Power"
-    required_columns = features + [target]
+    """Prepare features and target."""
+    features = ['Temperature', 'Dew_Point', 'Humidity']
+    target = 'Solar_Power'
     
-    # Convert to numeric and handle errors
-    for col in required_columns:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-        else:
-            print(f"❌ Missing column: {col}")
-            return None, None
-    
-    # Clean data
-    df_clean = df[required_columns].dropna()
-    
-    if df_clean.empty:
-        print("❌ No valid data remaining after cleaning")
-        return None, None
-    
-    print(f"\n✅ Cleaned data shape: {df_clean.shape}")
-    print("🔢 Final data types:")
-    print(df_clean.dtypes)
-    
-    X = df_clean[features].values
-    y = df_clean[target].values
+    X = df[features].values
+    y = df[target].values
     return X, y
 
 def create_graph_data(X, y):
-    """Create graph structure from tabular data."""
+    """Create temporal graph connections."""
     num_nodes = X.shape[0]
-    
-    # Create temporal connections (each node connected to next 3 nodes)
     edge_index = []
     for i in range(num_nodes):
+        # Connect each node to next 3 temporal neighbors
         for j in range(i+1, min(i+4, num_nodes)):
-            edge_index.append([i, j])
-            edge_index.append([j, i])
+            edge_index.extend([[i,j], [j,i]])
     
     edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
-    x = torch.tensor(X, dtype=torch.float)
-    y = torch.tensor(y, dtype=torch.float).view(-1, 1)
-    
-    return Data(x=x, edge_index=edge_index, y=y)
+    return Data(
+        x=torch.tensor(X, dtype=torch.float),
+        edge_index=edge_index,
+        y=torch.tensor(y, dtype=torch.float).view(-1,1)
+    )
 
 class SolarGNN(torch.nn.Module):
-    def __init__(self, num_features, hidden_dim=64):
+    def __init__(self, input_dim, hidden_dim=64):
         super().__init__()
-        self.conv1 = GCNConv(num_features, hidden_dim)
+        self.conv1 = GCNConv(input_dim, hidden_dim)
         self.conv2 = GCNConv(hidden_dim, hidden_dim)
-        self.dropout = torch.nn.Dropout(0.2)
         self.lin = torch.nn.Linear(hidden_dim, 1)
 
     def forward(self, x, edge_index):
-        x = self.conv1(x, edge_index)
-        x = F.relu(x)
-        x = self.dropout(x)
-        x = self.conv2(x, edge_index)
-        x = F.relu(x)
-        x = self.lin(x)
-        return x
+        x = F.relu(self.conv1(x, edge_index))
+        x = F.relu(self.conv2(x, edge_index))
+        return self.lin(x)
 
-def train_gnn_model(X, y):
-    """Enhanced training loop with early stopping."""
-    idx = np.arange(len(X))
-    idx_train, idx_test = train_test_split(idx, test_size=0.2, random_state=42)
-    
+def train_model(X, y):
+    """Training loop with early stopping."""
     data = create_graph_data(X, y)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     data = data.to(device)
     
-    model = SolarGNN(num_features=X.shape[1]).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.005, weight_decay=1e-4)
-    loss_fn = torch.nn.MSELoss()
+    model = SolarGNN(X.shape[1]).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+    criterion = torch.nn.MSELoss()
     
     best_loss = float('inf')
     patience = 20
     counter = 0
-
-    print("\n🚀 Training Started:")
-    model.train()
+    
+    # Train-test split
+    idx = np.arange(len(y))
+    idx_train, idx_test = train_test_split(idx, test_size=0.2, random_state=42)
+    
+    print("🚀 Training started...")
     for epoch in range(500):
         optimizer.zero_grad()
         out = model(data.x, data.edge_index)
-        loss = loss_fn(out[idx_train], data.y[idx_train])
+        loss = criterion(out[idx_train], data.y[idx_train])
         loss.backward()
         optimizer.step()
         
         # Early stopping
-        if loss.item() < best_loss:
+        if loss < best_loss:
             best_loss = loss.item()
             counter = 0
         else:
             counter += 1
             
-        if (epoch+1) % 50 == 0:
-            print(f"Epoch {epoch+1:03d} | Train Loss: {loss.item():.4f}")
+        if epoch % 50 == 0:
+            print(f"Epoch {epoch+1} | Loss: {loss.item():.4f}")
             
         if counter >= patience:
-            print(f"⏹️ Early stopping at epoch {epoch+1}")
+            print("⏹️ Early stopping")
             break
-
-    # Final evaluation
+    
+    # Evaluation
     model.eval()
     with torch.no_grad():
         y_pred = model(data.x, data.edge_index).cpu().numpy().flatten()
         y_true = data.y.cpu().numpy().flatten()
         
-        print("\n📊 Final Evaluation:")
-        print(f"Train samples: {len(idx_train)}")
-        print(f"Test samples: {len(idx_test)}")
-        
-        y_pred_test = y_pred[idx_test]
-        y_true_test = y_true[idx_test]
-        
-        mse = mean_squared_error(y_true_test, y_pred_test)
-        mae = mean_absolute_error(y_true_test, y_pred_test)
-        rmse = np.sqrt(mse)
-        r2 = r2_score(y_true_test, y_pred_test)
-        
-        print(f"\n✅ Model Metrics:")
-        print(f"MSE:  {mse:.4f}")
-        print(f"MAE:  {mae:.4f}")
-        print(f"RMSE: {rmse:.4f}")
-        print(f"R²:   {r2:.4f}")
-
-    return model
+        print("\n📊 Final Metrics:")
+        print(f"MSE: {mean_squared_error(y_true[idx_test], y_pred[idx_test]):.4f}")
+        print(f"MAE: {mean_absolute_error(y_true[idx_test], y_pred[idx_test]):.4f}")
+        print(f"R²: {r2_score(y_true[idx_test], y_pred[idx_test]):.4f}")
 
 def main():
     file_path = "Data_solar_on_27-04-2022.xlsx"
@@ -198,7 +160,7 @@ def main():
         X, y = prepare_features(df)
         
         if X is not None and y is not None:
-            train_gnn_model(X, y)
+            train_model(X, y)
 
 if __name__ == "__main__":
     main()
