@@ -1,13 +1,26 @@
+# Install PyTorch Geometric and dependencies
+import torch
+import subprocess
+
+# Detect PyTorch and CUDA versions
+TORCH_VERSION = torch.__version__.split('+')[0]
+CUDA_VERSION = f'cu{torch.version.cuda.replace(".", "")}' if torch.cuda.is_available() else 'cpu'
+
+# Install required packages
+subprocess.run(f"pip install torch-scatter torch-sparse torch-cluster torch-spline-conv -f https://data.pyg.org/whl/torch-{TORCH_VERSION}+{CUDA_VERSION}.html", shell=True, check=True)
+subprocess.run("pip install torch-geometric", shell=True, check=True)
+
+# Now import PyG modules
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-
-import torch
-import torch.nn.functional as F
 from torch_geometric.data import Data
 from torch_geometric.nn import GCNConv
+import torch
+import torch.nn.functional as F
 
+# Rest of your original code remains the same
 def load_data(file_path):
     """Load dataset from Excel file."""
     try:
@@ -58,19 +71,16 @@ def prepare_features(df):
 def create_graph_data(X, y):
     """Convert tabular data to PyTorch Geometric Data object."""
     num_nodes = X.shape[0]
-    # Fully connected graph (for demonstration)
-    row = []
-    col = []
+    # Create fully connected graph
+    edge_index = []
     for i in range(num_nodes):
         for j in range(num_nodes):
             if i != j:
-                row.append(i)
-                col.append(j)
-    edge_index = torch.tensor([row, col], dtype=torch.long)
+                edge_index.append([i, j])
+    edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
     x = torch.tensor(X, dtype=torch.float)
     y = torch.tensor(y, dtype=torch.float).view(-1, 1)
-    data = Data(x=x, edge_index=edge_index, y=y)
-    return data
+    return Data(x=x, edge_index=edge_index, y=y)
 
 class GCNRegressor(torch.nn.Module):
     def __init__(self, num_features, hidden_dim=32):
@@ -89,7 +99,6 @@ class GCNRegressor(torch.nn.Module):
 
 def train_gnn_model(X, y):
     """Train a GNN regressor and evaluate metrics."""
-    # Split indices for train/test
     idx = np.arange(len(X))
     idx_train, idx_test = train_test_split(idx, test_size=0.2, random_state=42)
     
