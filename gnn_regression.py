@@ -23,8 +23,8 @@ import torch.nn.functional as F
 def load_data(file_path):
     """Load dataset from Excel file, skipping metadata rows."""
     try:
-        # Skip first 2 rows containing metadata/headers
-        df = pd.read_excel(file_path, skiprows=2)
+        # Skip first 4 rows containing metadata/headers
+        df = pd.read_excel(file_path, skiprows=4)
         return df
     except FileNotFoundError:
         print("❌ The file was not found.")
@@ -35,11 +35,13 @@ def preprocess_data(df):
     # Clean column names
     df.columns = df.columns.str.strip()
     
-    # Fix column name typos
+    # Fix column name typos and inconsistencies
     df.rename(columns={
-        "Sloar Power": "Solar Power",
-        "Temperature Units.1": "Temperature Units",
-        "Dew Point Units.1": "Dew Point Units"
+        "Sloar Power(w).1": "Solar Power",
+        "Temperature©.1": "Temperature Units",
+        "Relative Humidity(%).1": "Relative Humidity Units",
+        "Surface Albedo.1": "Surface Albedo",
+        "Dew Point©.1": "Dew Point Units"
     }, inplace=True, errors='ignore')
     
     return df
@@ -54,8 +56,12 @@ def inspect_data(df):
 
 def prepare_features(df):
     """Prepare features and target with robust type handling."""
-    features = ["Temperature Units", "Pressure Units", 
-                "Relative Humidity Units", "Wind Speed Units"]
+    features = [
+        "Temperature Units", 
+        "Dew Point Units",
+        "Relative Humidity Units", 
+        "Surface Albedo"
+    ]
     target = "Solar Power"
     required_columns = features + [target]
     
@@ -86,10 +92,10 @@ def create_graph_data(X, y):
     """Create graph structure from tabular data."""
     num_nodes = X.shape[0]
     
-    # Create sparse connections (every node connected to next 5 nodes)
+    # Create temporal connections (each node connected to next 3 nodes)
     edge_index = []
     for i in range(num_nodes):
-        for j in range(i+1, min(i+6, num_nodes)):
+        for j in range(i+1, min(i+4, num_nodes)):
             edge_index.append([i, j])
             edge_index.append([j, i])
     
@@ -99,7 +105,7 @@ def create_graph_data(X, y):
     
     return Data(x=x, edge_index=edge_index, y=y)
 
-class ImprovedGNN(torch.nn.Module):
+class SolarGNN(torch.nn.Module):
     def __init__(self, num_features, hidden_dim=64):
         super().__init__()
         self.conv1 = GCNConv(num_features, hidden_dim)
@@ -125,7 +131,7 @@ def train_gnn_model(X, y):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     data = data.to(device)
     
-    model = ImprovedGNN(num_features=X.shape[1]).to(device)
+    model = SolarGNN(num_features=X.shape[1]).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.005, weight_decay=1e-4)
     loss_fn = torch.nn.MSELoss()
     
